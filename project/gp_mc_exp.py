@@ -34,6 +34,7 @@ def get_datasets(num_train, num_test, rnd_key):
     # convert to unix time (and reset by start time) and add zero dimension
     xs = df_f['Time']
     xs = (pd.to_datetime(xs, format='%m/%d/%y %H:%M').astype(int) // 1e9).values
+    xs = xs / (60 * 60 * 24)
     xs = xs - xs[0]
     xs = xs.astype(float)
     xs = xs[:, None]
@@ -88,13 +89,13 @@ def format_data_to_plot(D):
     return x, y
 
 def format_standard_plot(ax):
-    ax.set_xlabel("Elapsed Time (s)")
+    ax.set_xlabel("Elapsed Days")
     ax.set_ylabel("Soil Moisture Content (m$^3$ m$^{-3}$)")
     ax.set_ylim([0, 60])
 
 def format_derivative_plot(ax):
-    ax.set_xlabel("Elapsed Time (s)")
-    ax.set_ylabel("Soil Moisture Content Derivative (m$^3$ m$^{-3}$ t$^{-1}$)")
+    ax.set_xlabel("Elapsed Days")
+    ax.set_ylabel("Soil Moisture Content Derivative (m$^3$ m$^{-3}$ day$^{-1}$)")
     # ax.set_ylim([-0.5, 0.5])
 
 
@@ -117,10 +118,22 @@ class StationaryDerivativeKernel(gpx.kernels.AbstractKernel):
         zp = jnp.array(Xp[1], dtype=int)
 
         k0 = (1 - z)* (1 - zp) * self.kernel(X, Xp)
-        k1 = (z * zp) * jnp.array(jax.hessian(self.kernel)(X, Xp), dtype=jnp.float64)[0][1]
-        k2 = (z - zp) * (z - zp) * jnp.array(jax.grad(self.kernel)(X, Xp), dtype=jnp.float64)[zp]
+        k1 = (z * zp) * jnp.array(jax.hessian(self.kernel, argnums=[0,1])(X, Xp), dtype=jnp.float64)[1][0][0][0]
+        k2 = (z - zp) * (z - zp) * jnp.array(jax.grad(self.kernel, argnums=[0,1])(X, Xp), dtype=jnp.float64)[zp][0]
+        # print(k2)
+        # print(k2.shape)
+        # assert False
+        # k3 = zp * k2[0] 
+        # k2 = z * - k2[0] 
+        # print(jnp.array(jax.hessian(self.kernel, argnums=[0,1])(X, Xp), dtype=jnp.float64)[0,0,1,0])
+        # print(jnp.array(jax.hessian(self.kernel, argnums=[0,1])(X, Xp), dtype=jnp.float64))
+        # print(k1.shape)
+        # print(k1)
+        # print(jnp.array(jax.grad(self.kernel)(X, Xp), dtype=jnp.float64).shape)
+        # print(jnp.array(jax.grad(self.kernel)(X, Xp), dtype=jnp.float64))
 
         return k0 + k1 + k2
+        # return k0 + k1 + k2 + k3
                 
 def fit_gp(D, init_gp_params):
     kernel = gpx.kernels.RBF(
@@ -131,14 +144,21 @@ def fit_gp(D, init_gp_params):
     kernel = StationaryDerivativeKernel(kernel=kernel)
     mean = gpx.mean_functions.Zero()
     prior = gpx.gps.Prior(mean_function=mean, kernel=kernel)
+
     likelihood = gpx.likelihoods.Gaussian(num_datapoints=D.n, obs_stddev=np.sqrt(init_gp_params["likelihood"]["variance"]))
     posterior = prior * likelihood
 
+
+    x = D.X
+    y = D.y - init_gp_params["mean"]["constant"]
+    train_D = gpx.Dataset(x, y)
+
+    opt_posterior = posterior
     opt_posterior, history = gpx.fit_scipy(
     model=posterior,
     # we use the negative mll as we are minimising
     objective=lambda p, d: -gpx.objectives.conjugate_mll(p, d),
-    train_data=D,
+    train_data=train_D,
     verbose=False
     )
     # print(history)
@@ -146,7 +166,7 @@ def fit_gp(D, init_gp_params):
     return prior, posterior, opt_posterior
 
 
-def get_gp_pred_dist(D_train, x_test, prior, posterior, opt_posterior):
+def get_gp_pred_dist(D_train, x_test, prior, posterior, opt_posterior, init_gp_mean):
     pred_dist_dict = {
         "Prior": {
             "mean": np.nan,
@@ -162,18 +182,22 @@ def get_gp_pred_dist(D_train, x_test, prior, posterior, opt_posterior):
         } 
     }
 
+    x = D_train.X
+    y = D_train.y - init_gp_mean
+    D_train = gpx.Dataset(x, y)
+
     prior_dist = prior.predict(x_test)
-    pred_dist_dict["Prior"]["mean"] = prior_dist.mean()
+    pred_dist_dict["Prior"]["mean"] = prior_dist.mean() + init_gp_mean
     pred_dist_dict["Prior"]["std"] = prior_dist.stddev()
 
     post_dist = posterior.predict(x_test, train_data=D_train)
     post_pred_dist = posterior.likelihood(post_dist)
-    pred_dist_dict["Posterior"]["mean"] = post_pred_dist.mean()
+    pred_dist_dict["Posterior"]["mean"] = post_pred_dist.mean() + init_gp_mean
     pred_dist_dict["Posterior"]["std"] = post_pred_dist.stddev()
     
     opt_post_dist = opt_posterior.predict(x_test, train_data=D_train)
     opt_post_pred_dist = opt_posterior.likelihood(opt_post_dist)
-    pred_dist_dict["Opt. Posterior"]["mean"] = opt_post_pred_dist.mean()
+    pred_dist_dict["Opt. Posterior"]["mean"] = opt_post_pred_dist.mean() + init_gp_mean
     pred_dist_dict["Opt. Posterior"]["std"] = opt_post_pred_dist.stddev()
 
     return pred_dist_dict
@@ -188,8 +212,13 @@ def ready_sample(sample):
     sample = jnp.concatenate([sample[:, None], jnp.array([0,1])[:, None]], axis=1)
     return sample
     
-def rejection_sampling(D_train, gp_post, a, b, TOTAL_ITER, T, rnd_key):
+def rejection_sampling(D_train, gp_post, init_gp_mean, a, b, TOTAL_ITER, T, rnd_key):
     samples = []
+
+    x = D_train.X
+    y = D_train.y - init_gp_mean
+    D_train = gpx.Dataset(x, y)
+
     for i in tqdm(range(TOTAL_ITER)):
         rnd_key, subkey = jr.split(rnd_key)
         t = jr.uniform(subkey, (1,), minval=0, maxval=T)
@@ -203,7 +232,7 @@ def rejection_sampling(D_train, gp_post, a, b, TOTAL_ITER, T, rnd_key):
         joint_pred_mean = joint_pred_dist.mean()
         joint_pred_std = joint_pred_dist.stddev()
 
-        f_pred_mean = joint_pred_mean[0]
+        f_pred_mean = joint_pred_mean[0] + init_gp_mean
         fd_pred_mean = joint_pred_mean[1]
         fd_pred_std = joint_pred_std[1]
 
@@ -212,9 +241,9 @@ def rejection_sampling(D_train, gp_post, a, b, TOTAL_ITER, T, rnd_key):
         
         if u < y:
             print(f"Accepted Sample {len(samples)}: {f_pred_mean}")
-            samples.append(fd_pred_mean)
+            samples.append(f_pred_mean)
     
-    return np.array(samples), rnd_key
+    return samples, rnd_key
 
 
 ########
@@ -227,15 +256,18 @@ def main():
     A = -0.1
     B = -0.05
     NUM_SAMPLES = 1000
-    NUM_TRAIN = 100
+    NUM_TRAIN = 200
     NUM_TEST = 100
     INIT_GP_PARAMS = {
         "kernel": {
-            "lengthscale": 1e4, 
-            "variance": 10.0
+            "lengthscale": 1.0, 
+            "variance": 1.0
         },
         "likelihood": {
             "variance": 1.0
+        },
+        "mean" :{
+            "constant": 30.0
         }
     }
     DATA_IDX = 0
@@ -259,6 +291,22 @@ def main():
     plt.show()
 
     prior, posterior, opt_posterior = fit_gp(dataset_dict['train'][DATA_IDX], INIT_GP_PARAMS)
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    x = jnp.array([
+        [1, 0],
+        [2, 1],
+        [3, 1]
+    ], dtype=jnp.float64)
+    kernel = prior.kernel
+    K = kernel.gram(x).to_dense() 
+    plt.title('Kernel Matrix on 3 points')
+    plt.imshow(K, cmap='viridis')
+    plt.colorbar()
+    for i in range(K.shape[0]):
+        for j in range(K.shape[1]):
+            plt.text(j, i, f"{K[i, j]:.2f}", ha='center', va='center', color='w')
+    plt.show()
+
     opt_params = {
         "kernel": {
             "lengthscale": float(opt_posterior.prior.kernel.kernel.lengthscale.value.take(0)),
@@ -268,8 +316,8 @@ def main():
             "variance": float(opt_posterior.likelihood.obs_stddev)
         }
     }
-    # print(f"Initial GP Parameters: {INIT_GP_PARAMS}")
-    # print(f"Optimised GP Parameters: {opt_params}")
+    print(f"Initial GP Parameters: {INIT_GP_PARAMS}")
+    print(f"Optimised GP Parameters: {opt_params}")
 
 
     print(f"Plotting GP for Sensor {DATA_IDX+1}")
@@ -280,7 +328,7 @@ def main():
     x_test_gp = add_zeros_dim(x_test[:, None])
 
     pred_dist_dict = get_gp_pred_dist(dataset_dict['train'][DATA_IDX], x_test_gp, 
-                                      prior, posterior, opt_posterior)    
+                                      prior, posterior, opt_posterior, INIT_GP_PARAMS['mean']['constant'])    
     for i, (title, pred_dist_dict) in enumerate(pred_dist_dict.items()):
         mean = pred_dist_dict["mean"]
         std = pred_dist_dict["std"]
@@ -309,7 +357,7 @@ def main():
     # plotting derivatives 
     x_test_gp = add_ones_dim(x_test[:, None])
     pred_dist_dict = get_gp_pred_dist(dataset_dict['train'][DATA_IDX], x_test_gp, 
-                                      prior, posterior, opt_posterior)
+                                      prior, posterior, opt_posterior, 0.0)
     for i, (title, pred_dist_dict) in enumerate(pred_dist_dict.items()):
         mean = pred_dist_dict["mean"]
         std = pred_dist_dict["std"]
@@ -340,9 +388,10 @@ def main():
 
     print("Rejection Sampling")
     samples, rnd_key = rejection_sampling(dataset_dict['train'][DATA_IDX], 
-                                          opt_posterior, 
+                                          posterior, INIT_GP_PARAMS['mean']['constant'],
                                           A, B, NUM_SAMPLES, dataset_dict['train'][DATA_IDX].X.max(),
                                           rnd_key)
+    print(samples)
     
     mc_field_capacity = np.mean(samples)
 
