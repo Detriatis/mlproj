@@ -3,10 +3,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from jax import config
 from jaxtyping import (
-    PyTree,
     Array,
     Float,
-    Int,
     install_import_hook,
 )
 
@@ -67,6 +65,28 @@ def add_ones_dim(xs):
 # Vis #
 #######
 
+# Latex document Text width
+latex_width = 397.48499
+mpl.rcParams['figure.dpi'] = 100
+mpl.rcParams['font.size'] = 9
+
+def set_size(width=latex_width, height=latex_width, fraction=1, subplots=(1, 1)):
+    """Set figure dimensions to avoid scaling in LaTeX.
+    
+    Credit to Jack Walton for the function.
+    Source: https://jwalton.info/Embed-Publication-Matplotlib-Latex/
+    """
+
+    fig_width_pt = width
+    fig_height_pt = height * fraction
+    
+    inches_per_pt = 1 / 72.27
+    
+    fig_width_in = fig_width_pt * inches_per_pt
+    fig_height_in = fig_height_pt * inches_per_pt * (subplots[0] / subplots[1])
+
+    return (fig_width_in, fig_height_in)
+
 def format_data_to_plot(D):
     x = D.X[:, 0]
     y = D.y
@@ -80,15 +100,19 @@ def format_data_to_plot(D):
 
 def format_standard_plot(ax):
     ax.set_xlabel("Elapsed Days")
-    ax.set_ylabel("Soil Moisture Content (m$^3$ m$^{-3}$)")
+    ax.set_ylabel("Soil Moisture")
     ax.set_xlim([0, 30])
     ax.set_ylim([10, 60])
+    ax.set_xticks([0, 15, 30])
+    ax.set_yticks([10, 35, 60])
 
 def format_derivative_plot(ax):
     ax.set_xlabel("Elapsed Days")
-    ax.set_ylabel("Soil Moisture Content Derivative (m$^3$ m$^{-3}$ day$^{-1}$)")
+    ax.set_ylabel("Soil Moisture Rate")
     ax.set_xlim([0, 30])
     ax.set_ylim([-30, 30])
+    ax.set_xticks([0, 15, 30])
+    ax.set_yticks([-30, 0, 30])
 
 
 
@@ -126,9 +150,9 @@ def get_gp(kernel, init_gp_params):
 
     return prior, posterior
                 
-def fit_gp(D, posterior, init_gp_params):
+def fit_gp(D, posterior, init_gp_mean):
     x = D.X
-    y = D.y - init_gp_params["mean"]["constant"]
+    y = D.y - init_gp_mean
     train_D = gpx.Dataset(x, y)
 
     opt_posterior, history = gpx.fit_scipy(
@@ -189,11 +213,15 @@ def ready_sample(sample):
     sample = jnp.concatenate([sample, second_row], axis=1)
     return sample
     
-def rejection_sampling(datasets, gp, init_gp_mean, a, b, T, total_tries, samples_per_try, var_n, rnd_key):
+def rejection_sampling(datasets, gp, init_gp_mean, a, b, T, total_tries, samples_per_try, var_n, refit, rnd_key):
     samples = []
-
     for i in range(total_tries):
         curr_samples = []
+
+        if refit:
+            posterior = fit_gp(datasets[i], gp, init_gp_mean)
+        else:
+            posterior = gp
         while len(curr_samples) < var_n:
             D_train = gpx.Dataset(datasets[i].X, datasets[i].y - init_gp_mean)
 
@@ -204,8 +232,8 @@ def rejection_sampling(datasets, gp, init_gp_mean, a, b, T, total_tries, samples
             rnd_key, subkey = jr.split(rnd_key)
             u = jr.uniform(subkey, (samples_per_try,), minval=0, maxval=1)
 
-            joint_dist = gp.predict(t, train_data=D_train)
-            joint_pred_dist = gp.likelihood(joint_dist)
+            joint_dist = posterior.predict(t, train_data=D_train)
+            joint_pred_dist = posterior.likelihood(joint_dist)
             joint_pred_mean = joint_pred_dist.mean()
             joint_pred_std = joint_pred_dist.stddev()
 
@@ -243,6 +271,7 @@ def sample_mean_variance(samples, var_n):
 def main():
     print("Starting Script")
 
+    GROUND_TRUTH = 30.151352963023253
     MIN15_PER_DAY = 4 * 24
     A = -0.1 * MIN15_PER_DAY
     B = -0.05 * MIN15_PER_DAY
@@ -250,6 +279,7 @@ def main():
     DATASET_SIZE = 100
     TOTAL_ITER = 10
     SAMPLES_PER_ITER = 1000
+    REFIT = False
     VAR_N = 100
     INIT_GP_PARAMS = {
         "kernel": {
@@ -269,16 +299,14 @@ def main():
     print("Loading datasets")
     full_data, datasets, rnd_key = get_datasets(TOTAL_ITER, DATASET_SIZE, rnd_key)
 
-    print("Plotting training data")
+    print("Plotting data")
     cols = mpl.rcParams["axes.prop_cycle"].by_key()["color"]
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    fig, ax = plt.subplots(1, 1, figsize=set_size(subplots=(1, 1), fraction=0.25))
     x, y = format_data_to_plot(full_data)
     plt.plot(x, y, color=cols[0])
     format_standard_plot(ax)
-    ax.set_title(f"Data")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
+    ax.set_xticks([0, 5, 10, 15, 20, 25, 30])
+    plt.savefig("data.pdf", bbox_inches='tight')
 
 
     kernel = gpx.kernels.RBF(
@@ -287,7 +315,7 @@ def main():
         variance=INIT_GP_PARAMS["kernel"]["variance"]
     )  
     prior, posterior = get_gp(kernel, INIT_GP_PARAMS)
-    opt_posterior = fit_gp(datasets[0], posterior, INIT_GP_PARAMS)
+    opt_posterior = fit_gp(datasets[0], posterior, INIT_GP_PARAMS['mean']['constant'])
     opt_params = {
         "kernel": {
             "lengthscale": float(opt_posterior.prior.kernel.kernel.lengthscale.value.take(0)),
@@ -301,99 +329,66 @@ def main():
     print(f"Optimised GP Parameters: {opt_params}")
 
 
-    print(f"Plotting GP")
-    fig, axs = plt.subplots(3, 2, figsize=(8, 12))
-    
-    x = datasets[0].X[:, 0]
-    x_test = np.linspace(x.min(), x.max(), 100)
+    print(f"Plotting GP")    
+    x_test = np.linspace(0, 30, 100)
+
     x_test_gp = add_zeros_dim(x_test[:, None])
-
     pred_dist_dict = get_gp_pred_dist(datasets[0], x_test_gp, 
-                                      prior, posterior, opt_posterior, INIT_GP_PARAMS['mean']['constant'])    
-    for i, (title, pred_dist_dict) in enumerate(pred_dist_dict.items()):
-        mean = pred_dist_dict["mean"]
-        std = pred_dist_dict["std"]
-        x_train, y_train = format_data_to_plot(datasets[0])
-        format_standard_plot(axs[i, 0])
-
-        axs[i, 0].scatter(x_train, y_train, color=cols[0], label='Training Data', s=20)
-        axs[i, 0].plot(x_test, mean, label='$\mu$', color=cols[1])
-        axs[i, 0].fill_between(x_test, mean - 2 * std, mean + 2 * std, alpha=0.2, color=cols[1], label='$\mu \pm 2\sigma$')
-        axs[i, 0].legend()
-
-        if i == 1:
-            l = INIT_GP_PARAMS['kernel']['lengthscale']
-            v = INIT_GP_PARAMS['kernel']['variance']
-            e = INIT_GP_PARAMS['likelihood']['variance']
-        elif i == 2:
-            l = opt_params['kernel']['lengthscale']
-            v = opt_params['kernel']['variance']
-            e = opt_params['likelihood']['variance']
-        
-        if i == 0:
-            axs[i, 0].set_title(f"{title} GP")
-        else:
-            axs[i, 0].set_title(f"{title} GP ($\ell:$ {l:.2f}, $\sigma^2_f:$ {v:.2f}, $\sigma^2_e:$ {e:.2f})")
-
-    # plotting derivatives 
+                                      prior, posterior, opt_posterior, INIT_GP_PARAMS['mean']['constant'])
+    
     x_test_gp = add_ones_dim(x_test[:, None])
-    pred_dist_dict = get_gp_pred_dist(datasets[0], x_test_gp, 
-                                      prior, posterior, opt_posterior, 0.0)
-    for i, (title, pred_dist_dict) in enumerate(pred_dist_dict.items()):
-        mean = pred_dist_dict["mean"]
-        std = pred_dist_dict["std"]
-        format_derivative_plot(axs[i, 1])
+    rate_pred_dist_dict = get_gp_pred_dist(datasets[0], x_test_gp,
+                                           prior, posterior, opt_posterior, 0.0)
+    names = ['Prior', 'Posterior', 'Opt. Posterior']
+    for i in range(3):
+        fig, axs = plt.subplots(1, 2, figsize=set_size(subplots=(1, 2), fraction=0.75))
+        mean = pred_dist_dict[names[i]]["mean"]
+        std = pred_dist_dict[names[i]]["std"]
+        x_train, y_train = format_data_to_plot(datasets[0])
+        format_standard_plot(axs[0])
+        axs[0].plot(x_test, mean, label='$\mu$', color=cols[1], linewidth=1)
+        axs[0].fill_between(x_test, mean - 2 * std, mean + 2 * std, alpha=0.2, color=cols[1], label='$\mu \pm 2\sigma$')
+        axs[0].scatter(x_train, y_train, color=cols[0], label='Samples', marker='.', s=10)
+        # axs[0].legend()
 
+        mean = rate_pred_dist_dict[names[i]]["mean"]
+        std = rate_pred_dist_dict[names[i]]["std"]
+        format_derivative_plot(axs[1])
+        axs[1].plot(x_test, mean, label='$\mu$', color=cols[1], linewidth=1.0)
+        axs[1].fill_between(x_test, mean - 2 * std, mean + 2 * std, alpha=0.2, color=cols[1], label='$\mu \pm 2\sigma$')
+        # axs[1].legend()
 
-        axs[i, 1].plot(x_test, mean, label='$\mu$', color=cols[1])
-        axs[i, 1].fill_between(x_test, mean - 2 * std, mean + 2 * std, alpha=0.2, color=cols[1], label='$\mu \pm 2\sigma$')
-        axs[i, 1].legend()
+        plt.tight_layout()
+        plt.savefig(f"gp_{names[i].replace(' ', '_').lower()}.pdf", bbox_inches='tight')
 
-        if i == 1:
-            l = INIT_GP_PARAMS['kernel']['lengthscale']
-            v = INIT_GP_PARAMS['kernel']['variance']
-            e = INIT_GP_PARAMS['likelihood']['variance']
-        elif i == 2:
-            l = opt_params['kernel']['lengthscale']
-            v = opt_params['kernel']['variance']
-            e = opt_params['likelihood']['variance']
-        
-        if i == 0:
-            axs[i, 1].set_title(f"{title} GP Derivative")
-        else:
-            axs[i, 1].set_title(f"{title} GP Derivative ($\ell:$ {l:.2f}, $\sigma^2_f:$ {v:.2f}, $\sigma^2_e:$ {e:.2f})")
-
-    plt.tight_layout()
-    plt.show()
 
 
     print("Rejection Sampling")
+    
     samples, rnd_key = rejection_sampling(datasets, 
                                           posterior, INIT_GP_PARAMS['mean']['constant'],
-                                          A, B, T, TOTAL_ITER, SAMPLES_PER_ITER, VAR_N,
+                                          A, B, T, TOTAL_ITER, SAMPLES_PER_ITER, VAR_N, REFIT,
                                           rnd_key)
     
-
-    print("Calculating Field Capacity")
+    x, y
     total_samples = np.concatenate(samples)
     total_fc = np.mean(total_samples)
     means, vars = sample_mean_variance(samples, VAR_N)
-
     print(f"Number of Samples: {len(total_samples)}")
     print(f"Estimated Field Capacity: {total_fc}")
     print(f"{len(vars)}-Sample Variance of Field Capacity: {vars[-1]}")
 
     # plotting variance and mean field capacity over number of samples
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    plt.plot(1 + np.arange(VAR_N), means, label='$\mu$')
-    ax.fill_between(1 + np.arange(VAR_N), means - 2 * np.sqrt(vars), means + 2 * np.sqrt(vars), alpha=0.2, label='$\mu \pm 2\sigma$')
+    fig, ax = plt.subplots(1, 1, figsize=set_size(subplots=(1, 1), fraction=0.25))
+    plt.plot(1 + np.arange(VAR_N), means)
+    ax.fill_between(1 + np.arange(VAR_N), means - 2 * np.sqrt(vars), means + 2 * np.sqrt(vars), alpha=0.2)
     ax.set_xlabel("Number of Samples")
-    ax.set_ylabel("Field Capacity")
+    ax.set_ylabel("Mean Field Capacity")
     ax.set_xlim([1, VAR_N])
-    ax.set_title("Monte Carlo Field Capacity Estimation")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
+    ax.set_ylim([25, 45])
+    ax.hlines(GROUND_TRUTH, 1, VAR_N, color=cols[2], linestyle='--', label='GT')
+    plt.savefig("mc_field_capacity.pdf", bbox_inches='tight')
+
     print("Finished Script")
 
 
