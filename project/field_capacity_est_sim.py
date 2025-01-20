@@ -67,6 +67,7 @@ def get_datasets(total_iter, dataset_size, rnd_key, sim=None):
         xs = (pd.to_datetime(xs, format='%m/%d/%y %H:%M').astype(int) // 1e9).values
         xs = xs - xs[0]
         ys = df_f[f'wfv_1'].values[:, None]
+        xs = xs / (60 * 60 * 24)
     else:
         dt = 0.1
         obs_interval = 15
@@ -83,12 +84,11 @@ def get_datasets(total_iter, dataset_size, rnd_key, sim=None):
                 obs_timer = 0
         xs = jnp.array(sim.data['observed']['t'][:-1])
         ys = jnp.array(sim.data['observed']['y'][:-1])[:,None]
-    xs = xs / (60 * 60 * 24)
+        xs = xs / (60 * 24)
     xs = xs.astype(float)
     xs = xs[:, None]
     xs = add_zeros_dim(xs)
-    full_data = gpx.Dataset(xs, ys)
-    breakpoint()
+    full_data = gpx.Dataset(xs, ys)  
     datasets = []
     for i in range(total_iter):
         # select random data for each dataset
@@ -340,8 +340,8 @@ def main():
             "constant": 30.0
         }
     }
-    theta0 = np.array([50, 40, 60, 40, 50, 60, 70, 40, 50, 80])
-    starts = np.arange(0, 15 * 2880, 4320)
+    theta0 = np.ones(30) * 100
+    starts = np.arange(0, 15 * 2880, 1440)
     sigma_theta = 1.0
     rnd_key = jr.key(42)
 
