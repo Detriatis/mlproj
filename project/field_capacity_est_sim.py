@@ -42,16 +42,17 @@ class RegularVariableIrrigationSim:
                 'y' : []
             }
         }
+        np.random.seed(42)
     
     def update(self, dt):
-        self.soil_moist = np.dot(self.theta0 * np.exp(-self.lam * (self.time - self.starts)), self.time >= self.starts)
+        self.soil_moist = np.dot(self.theta0 * np.exp(-self.lam * (self.time - self.starts)/15), self.time >= self.starts)
         self.time += dt
         self.data['latent']['t'].append(self.time)
         self.data['latent']['y'].append(self.soil_moist)
 
     def observation(self):
         self.data['observed']['t'].append(self.time)
-        self.data['observed']['y'].append(self.soil_moist + np.random.normal(0, self.sigma_theta))
+        self.data['observed']['y'].append(self.soil_moist + 0 * np.random.normal(0, self.sigma_theta))
 
 ########
 # Data #
@@ -72,7 +73,7 @@ def get_datasets(total_iter, dataset_size, rnd_key, sim=None):
         dt = 0.1
         obs_interval = 15
         t = 15 * 2880
-        min_threshold = 1.0
+        min_threshold = 0.0
 
         # run simulation
         obs_timer = 0
@@ -149,7 +150,7 @@ def format_standard_plot(ax):
     ax.set_xlabel("Elapsed Days")
     ax.set_ylabel("Soil Moisture")
     ax.set_xlim([0, 30])
-    ax.set_ylim([10, 60])
+    ax.set_ylim([0, 60])
     ax.set_xticks([0, 15, 30])
     ax.set_yticks([10, 35, 60])
 
@@ -330,18 +331,18 @@ def main():
     VAR_N = 100
     INIT_GP_PARAMS = {
         "kernel": {
-            "lengthscale": 1.0, 
+            "lengthscale": 10.0, 
             "variance": 1.0
         },
         "likelihood": {
             "variance": 1.0
         },
         "mean" :{
-            "constant": 30.0
+            "constant": 0.0
         }
     }
-    theta0 = np.ones(30) * 100
-    starts = np.arange(0, 15 * 2880, 1440)
+    theta0 = np.array([60])
+    starts = np.array([0])
     sigma_theta = 1.0
     rnd_key = jr.key(42)
 
@@ -409,6 +410,8 @@ def main():
         format_derivative_plot(axs[1])
         axs[1].plot(x_test, mean, label='$\mu$', color=cols[1], linewidth=1.0)
         axs[1].fill_between(x_test, mean - 2 * std, mean + 2 * std, alpha=0.2, color=cols[1], label='$\mu \pm 2\sigma$')
+        axs[1].hlines(A, 0, 30, color=cols[2], linestyle='--', label='Lower bound')
+        axs[1].hlines(B, 0, 30, color=cols[2], linestyle='--', label='Upper bound')
         # axs[1].legend()
 
         plt.tight_layout()
