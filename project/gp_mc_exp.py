@@ -305,6 +305,8 @@ def main():
             "variance": float(opt_posterior.likelihood.obs_stddev)
         }
     }
+    
+
     print(f"Initial GP Parameters: {INIT_GP_PARAMS}")
     print(f"Optimised GP Parameters: {opt_params}")
 

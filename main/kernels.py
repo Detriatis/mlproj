@@ -41,4 +41,3 @@ class StationaryDerivativeKernel(gpx.kernels.AbstractKernel):
         k2 = (z - zp) * (z - zp) * jnp.array(jax.grad(self.kernel, argnums=[0,1])(X, Xp), dtype=jnp.float64)[zp][0]
 
         return k0 + k1 + k2 
-    

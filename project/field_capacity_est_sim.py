@@ -250,6 +250,44 @@ def get_gp_pred_dist(D_train, x_test, prior, posterior, opt_posterior, init_gp_m
 
     return pred_dist_dict
 
+def get_opt_parameters(posterior, init_gp_params): 
+    params = init_gp_params["kernel"]
+
+    def get_kernels(prior): 
+        if 'kernel' in dir(prior):
+            return getattr(prior, 'kernel'), True
+        else: 
+            if 'kernels' in dir(prior): 
+                return getattr(prior, 'kernels'), False
+            else:
+                return getattr(prior, 'kernel'), False
+
+
+    flag = True 
+    kernels = posterior.prior 
+    while flag: 
+        kernels, flag = get_kernels(kernels)
+        if isinstance(kernels, gpx.kernels.RBF) or isinstance(kernels, gpx.kernels.Periodic):
+            kernels = [kernels]
+            break
+    
+
+    opt_params = {
+
+    } 
+
+    for kernel in kernels:
+        name = kernel.name
+        opt_params[name]={} 
+        for param in params:
+            attr = getattr(kernel, param, None)
+            if attr is None: 
+                continue 
+            opt_params[name][param] = attr.value  
+    opt_params['likelihood'] = {
+        "variance": float(posterior.likelihood.obs_stddev)
+    } 
+    return opt_params
 
 ############
 # Sampling #
@@ -312,13 +350,32 @@ def sample_mean_variance(samples, var_n):
     return means, vars
 
 
+### Trial Functionality 
+def detect_spikes(xs, ys, threshold=5.0):
+    """
+    Detect spike times and magnitudes based on the gradient of the data.
+    Args:
+        xs: Time values (1D array).
+        ys: Sensor readings (1D array).
+        threshold: Minimum gradient change to detect a spike.
+    Returns:
+        spike_times: Times of detected spikes.
+        spike_magnitudes: Magnitudes of detected spikes.
+    """
+    gradients = np.diff(ys.flatten()) / np.diff(xs.flatten())
+    spike_indices = np.where(gradients > threshold)[0]
+    spike_times = xs[spike_indices]
+    spike_magnitudes = ys[spike_indices + 1] - ys[spike_indices]
+    return spike_times, spike_magnitudes
+
+
 ########
 # Main #
 ########
 
 def main():
     print("Starting Script")
-
+    WRITEOUTPATH = "./figures/"
     GROUND_TRUTH = 30.151352963023253
     MIN15_PER_DAY = 4 * 24
     A = -0.1 * MIN15_PER_DAY
@@ -329,10 +386,12 @@ def main():
     SAMPLES_PER_ITER = 1000
     REFIT = False
     VAR_N = 100
+    
     INIT_GP_PARAMS = {
         "kernel": {
-            "lengthscale": 10.0, 
-            "variance": 1.0
+            "lengthscale": 5.0, 
+            "variance": 1.0,
+            "period": 10.0, 
         },
         "likelihood": {
             "variance": 1.0
@@ -346,13 +405,18 @@ def main():
     sigma_theta = 1.0
     rnd_key = jr.key(42)
 
-
     print("Loading datasets")
 
     # run simulation
     sim = RegularVariableIrrigationSim(theta0, starts, GROUND_TRUTH, sigma_theta)
+    
     full_data, datasets, rnd_key = get_datasets(TOTAL_ITER, DATASET_SIZE, rnd_key, sim)
 
+    
+    # Detect spikes
+    x, y = format_data_to_plot(datasets[0])
+
+    
     print("Plotting data")
     cols = mpl.rcParams["axes.prop_cycle"].by_key()["color"]
     fig, ax = plt.subplots(1, 1, figsize=set_size(subplots=(1, 1), fraction=0.25))
@@ -360,25 +424,32 @@ def main():
     plt.plot(x, y, color=cols[0])
     format_standard_plot(ax)
     ax.set_xticks([0, 5, 10, 15, 20, 25, 30])
-    plt.savefig("data.pdf", bbox_inches='tight')
+    plt.savefig(f"{WRITEOUTPATH}data.pdf", bbox_inches='tight')
 
-
-    kernel = gpx.kernels.RBF(
+    kernel_rbf = gpx.kernels.RBF(
         active_dims=[0],
         lengthscale=INIT_GP_PARAMS["kernel"]["lengthscale"],
         variance=INIT_GP_PARAMS["kernel"]["variance"]
-    )  
+    ) 
+
+    kernel_periodic = gpx.kernels.Periodic(
+        active_dims=[0],
+        lengthscale=INIT_GP_PARAMS["kernel"]["lengthscale"],
+        variance=INIT_GP_PARAMS["kernel"]["variance"],
+        period=INIT_GP_PARAMS["kernel"]["period"]
+    )
+
+
+    kernel = kernel_rbf
+    
     prior, posterior = get_gp(kernel, INIT_GP_PARAMS)
-    opt_posterior = fit_gp(datasets[0], posterior, INIT_GP_PARAMS['mean']['constant'])
-    opt_params = {
-        "kernel": {
-            "lengthscale": float(opt_posterior.prior.kernel.kernel.lengthscale.value.take(0)),
-            "variance": float(opt_posterior.prior.kernel.kernel.variance.value.take(0))
-        },
-        "likelihood": {
-            "variance": float(opt_posterior.likelihood.obs_stddev)
-        }
-    }
+    
+
+    opt_posterior = fit_gp(datasets[0], posterior, INIT_GP_PARAMS["mean"]["constant"])
+    
+    
+    opt_params = get_opt_parameters(opt_posterior, INIT_GP_PARAMS)
+      
     print(f"Initial GP Parameters: {INIT_GP_PARAMS}")
     print(f"Optimised GP Parameters: {opt_params}")
 
@@ -415,21 +486,33 @@ def main():
         # axs[1].legend()
 
         plt.tight_layout()
-        plt.savefig(f"gp_{names[i].replace(' ', '_').lower()}.pdf", bbox_inches='tight')
+        plt.savefig(f"{WRITEOUTPATH}gp_{names[i].replace(' ', '_').lower()}.pdf", bbox_inches='tight')
 
 
 
     print("Rejection Sampling")
     
-    samples, rnd_key = rejection_sampling(datasets, 
-                                          posterior, INIT_GP_PARAMS['mean']['constant'],
-                                          A, B, T, TOTAL_ITER, SAMPLES_PER_ITER, VAR_N, REFIT,
-                                          rnd_key)
+    REJECTION_SAMPLING_INPUTS = {
+        "datasets": datasets,
+        "gp":posterior, 
+        "init_gp_mean":INIT_GP_PARAMS['mean']['constant'], 
+        "a":A, 
+        "b":B, 
+        "T":T, 
+        "total_tries":TOTAL_ITER, 
+        "samples_per_try":SAMPLES_PER_ITER, 
+        "var_n":VAR_N, 
+        "refit":REFIT, 
+        "rnd_key":rnd_key
+
+    }
     
-    x, y
+    samples, rnd_key = rejection_sampling(**REJECTION_SAMPLING_INPUTS)
     total_samples = np.concatenate(samples)
+    
     total_fc = np.mean(total_samples)
     means, vars = sample_mean_variance(samples, VAR_N)
+    
     print(f"Number of Samples: {len(total_samples)}")
     print(f"Estimated Field Capacity: {total_fc}")
     print(f"{len(vars)}-Sample Variance of Field Capacity: {vars[-1]}")
@@ -443,7 +526,7 @@ def main():
     ax.set_xlim([1, VAR_N])
     ax.set_ylim([25, 45])
     ax.hlines(GROUND_TRUTH, 1, VAR_N, color=cols[2], linestyle='--', label='GT')
-    plt.savefig("mc_field_capacity.pdf", bbox_inches='tight')
+    plt.savefig(f"{WRITEOUTPATH}mc_field_capacity.pdf", bbox_inches='tight')
 
     print("Finished Script")
 
